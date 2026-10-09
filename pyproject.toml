@@ -34,11 +34,15 @@ dependencies = [
     "pip",
     "pubchempy>=1.0.4",
     "plotly",
+    "pyarrow",
+    "pydantic>=2",
     "pymoo",
     "pytorch-lightning",
+    "pyyaml",
     "rdkit>=2023.9.6",
     "safetensors",
     "scikit-learn",
+    "scipy",
     "seaborn>=0.13.2",
     "setuptools",
     "tokenizers",
@@ -48,6 +52,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = [
+    "mypy",
+    "pandas-stubs",
+    "pytest",
+    "ruff",
+    "types-PyYAML",
+]
 # Install with: uv pip install -e ".[cpu]"
 cpu = [
     "torch>=2.14",
@@ -68,3 +79,26 @@ extra-index-url = ["https://download.pytorch.org/whl/cu130"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+tani_predictor = ["py.typed", "vocab/*.json"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
+
+[tool.mypy]
+strict = true
+python_version = "3.14"
+plugins = ["pydantic.mypy"]
+mypy_path = "src:scripts"
+
+[[tool.mypy.overrides]]
+module = ["rdkit.*", "sklearn.*", "pyarrow.*", "scipy.*", "h5py.*", "joblib.*", "transformers.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

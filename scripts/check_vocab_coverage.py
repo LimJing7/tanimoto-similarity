@@ -4,6 +4,7 @@ For each vocab reports: how much of the data it covers, which data tokens are mi
 how many vocab entries are never used, and how many new tokens must be added
 (missing SMILES tokens + tokens required by the [MS]...[SMILES]... input format).
 """
+
 import argparse
 import json
 import re
@@ -11,38 +12,37 @@ from collections import Counter
 from multiprocessing import Pool
 from pathlib import Path
 
-# Schwaller et al. regex, same as ms2struct/smiles_tokenizers.py
-SMI_REGEX = re.compile(
-    r"""(\[[^\]]+]|Br?|Cl?|N|O|S|P|F|I|b|c|n|o|s|p|\(|\)|\.|=|#|-|\+|\\|\/|:|~|@|\?|>>?|\*|\$|\%[0-9]{2}|[0-9])"""
-)
+from tani_predictor.chem import strip_stereo
+from tani_predictor.tokenizer import tokenize_smiles
 
 # Tokens the input format needs besides SMILES tokens (digits/'.' for peak numbers).
-FORMAT_TOKENS = ["[MS]", "[SMILES]", ",", " ", ".", *"0123456789"]
+FORMAT_TOKENS: list[str] = ["[MS]", "[SMILES]", ",", " ", ".", *"0123456789"]
 
-HERE = Path(__file__).resolve().parent.parent / "src" / "tani_predictor"
-DEFAULT_VOCABS = {
+HERE: Path = Path(__file__).resolve().parent.parent / "src" / "tani_predictor" / "vocab"
+DEFAULT_VOCABS: dict[str, Path] = {
     "chemberta": HERE / "chemberta-vocab.json",
     "molformer": HERE / "molformer-vocab.json",
 }
-DEFAULT_ROOT = Path("/tier1/home/ljing2/backup/foam/results")
+DEFAULT_ROOT: Path = Path("/tier1/home/ljing2/backup/foam/results")
 
 
-def scan_file(path):
-    """Return (Counter of tokens, n_smiles, n_untokenizable) over unique SMILES in one TSV."""
-    smiles = set()
+def scan_file(path: Path) -> tuple[Counter[str], list[frozenset[str]], int]:
+    """Return (token counts, per-SMILES token sets, n_untokenizable) over unique stereo-stripped SMILES in one TSV."""
+    smiles: set[str] = set()
     with open(path) as f:
         for line in f:
             if line.startswith("# ground_truth_smiles="):
-                smiles.add(line.rstrip("\n").split("=", 1)[1])
+                smiles.add(strip_stereo(line.rstrip("\n").split("=", 1)[1]))
             elif line.startswith("#") or line.startswith("smiles\t"):
                 continue
             else:
-                smiles.add(line.split("\t", 1)[0].strip())
+                smiles.add(strip_stereo(line.split("\t", 1)[0].strip()))
     smiles.discard("")
-    counts, bad = Counter(), 0
-    per_smiles = []
+    counts: Counter[str] = Counter()
+    bad = 0
+    per_smiles: list[frozenset[str]] = []
     for smi in smiles:
-        toks = SMI_REGEX.findall(smi)
+        toks = tokenize_smiles(smi)
         if "".join(toks) != smi:
             bad += 1
             continue
@@ -51,7 +51,7 @@ def scan_file(path):
     return counts, per_smiles, bad
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("roots", nargs="*", type=Path, default=[DEFAULT_ROOT])
     ap.add_argument("--workers", type=int, default=32)
@@ -64,8 +64,9 @@ def main():
         files = files[: args.max_files]
     print(f"Scanning {len(files)} files with {args.workers} workers...")
 
-    total, bad = Counter(), 0
-    smiles_token_sets = Counter()  # distinct token-set -> number of SMILES (keeps memory small)
+    total: Counter[str] = Counter()
+    bad = 0
+    smiles_token_sets: Counter[frozenset[str]] = Counter()  # distinct token-set -> number of SMILES
     n_smiles = 0
     with Pool(args.workers) as pool:
         for i, (counts, sets, b) in enumerate(pool.imap_unordered(scan_file, files, chunksize=4), 1):
@@ -81,7 +82,7 @@ def main():
     print(f"Distinct tokens in data: {len(total):,}   SMILES the regex couldn't tokenize losslessly: {bad:,}")
 
     for name, vpath in DEFAULT_VOCABS.items():
-        vocab = json.load(open(vpath))
+        vocab: dict[str, int] = json.loads(vpath.read_text())
         specials = {t for t in vocab if re.fullmatch(r"\[unused\d+\]|<[a-z]+>|\[(PAD|UNK|CLS|SEP|MASK)\]", t)}
         missing = {t: c for t, c in total.items() if t not in vocab}
         covered_occ = n_occ - sum(missing.values())
@@ -94,10 +95,13 @@ def main():
         print(f"  token-occurrence coverage : {covered_occ / n_occ:.4%}")
         print(f"  SMILES fully covered      : {smiles_ok:,} / {n_smiles:,} ({smiles_ok / n_smiles:.4%})")
         print(f"  data tokens missing       : {len(missing):,} distinct ({sum(missing.values()):,} occurrences)")
-        print(f"  unused vocab entries      : {len(unused):,} of {len(vocab) - len(specials):,} non-special "
-              f"({len(unused) / (len(vocab) - len(specials)):.1%}) never appear in the data")
+        print(
+            f"  unused vocab entries      : {len(unused):,} of {len(vocab) - len(specials):,} non-special "
+            f"({len(unused) / (len(vocab) - len(specials)):.1%}) never appear in the data"
+        )
         print(f"  format tokens missing     : {len(fmt_missing)} -> {fmt_missing}")
-        print(f"  NEW tokens to add (total) : {len(new_needed)}  -> vocab_size would be {len(vocab) + len(new_needed):,}")
+        new_size = len(vocab) + len(new_needed)
+        print(f"  NEW tokens to add (total) : {len(new_needed)}  -> vocab_size would be {new_size:,}")
         if missing:
             top = sorted(missing.items(), key=lambda x: -x[1])[: args.top]
             print(f"  most frequent missing data tokens: {top}")

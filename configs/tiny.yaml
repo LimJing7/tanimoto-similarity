@@ -1,0 +1,28 @@
+# Smoke-test config: tiny model on a small processed subset (see README for the build command).
+model:
+  vocab_size: 142
+  hidden_size: 64
+  num_hidden_layers: 2
+  num_attention_heads: 4
+  intermediate_size: 128
+  max_position_embeddings: 8192
+
+data:
+  processed_dir: data/processed_smoke
+  max_len: 8192
+  candidates_per_spec: 32
+  eval_candidates_per_spec: 32
+  num_target_bins: 10
+  seed: 0
+
+train:
+  output_dir: runs/tiny
+  learning_rate: 1.0e-3
+  num_epochs: 1
+  max_steps: 300
+  per_device_batch_size: 16
+  gradient_accumulation_steps: 1
+  num_workers: 2
+  logging_steps: 20
+  save_steps: 1000
+  report_to: none

@@ -1,0 +1,31 @@
+model:
+  vocab_size: 142
+  hidden_size: 768
+  num_hidden_layers: 6
+  num_attention_heads: 12
+  intermediate_size: 3072
+  max_position_embeddings: 8192
+  gradient_checkpointing: false
+
+data:
+  processed_dir: data/processed
+  max_len: 8192
+  candidates_per_spec: 128
+  eval_candidates_per_spec: 256
+  num_target_bins: 10
+  seed: 0
+
+train:
+  output_dir: runs/base
+  learning_rate: 3.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+  num_epochs: 1
+  per_device_batch_size: 8
+  gradient_accumulation_steps: 4
+  bf16: true
+  num_workers: 4
+  logging_steps: 50
+  eval_steps: 1000
+  save_steps: 1000
+  report_to: none

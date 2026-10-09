@@ -3,3 +3,9 @@ tani-pred/
 *.egg-info/
 __pycache__/
 *.pyc
+.vscode/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+data/processed*/
+runs/

@@ -14,18 +14,11 @@ This is useful for re-ranking candidate structures in small molecule / metabolit
 
 ## Approach
 
-**Primary plan:** a Llama-based transformer (decoder-only, HuggingFace `LlamaForCausalLM` architecture — RMSNorm, SwiGLU, rotary embeddings), repurposed as a regressor: feed in a tokenized sequence covering the spectrum and the candidate SMILES, and read out a scalar in `[0, 1]` for scaled Tanimoto similarity instead of next-token logits.
+**Primary plan:** a Llama-based transformer (decoder-only, HuggingFace `LlamaModel` — RMSNorm, SwiGLU, rotary embeddings), repurposed as a regressor: feed in a tokenized sequence covering the spectrum and the candidate SMILES, and read out a scalar in `[0, 1]` for scaled Tanimoto similarity instead of next-token logits.
 
-Three untrained HF checkpoints with this config already exist at `/tier1/home/ljing2/chem/`, apparently prepared as size-variant starting points:
-- `untrained_llama_based_model/` — `hidden_size=768`, `num_hidden_layers=6`, `intermediate_size=3072`
-- `untrained_llama_based_model_2/` — `hidden_size=768`, `num_hidden_layers=20`, `intermediate_size=72` (deep/narrow MLP variant)
-- `untrained_llama_based_model_hidden3/` — `hidden_size=768`, `num_hidden_layers=3`, `intermediate_size=3072`
-
-All three share `vocab_size=598`, `bos_token_id=12`, `eos_token_id=13`, `pad_token_id=0`. These match `src/tani_predictor/chemberta-vocab.json` (591 tokens, `[PAD]=0`, `[CLS]=12`, `[SEP]=13`; token-for-token identical to `../ms2struct/vocab.txt`), with 7 extra embedding rows.
-
-Two candidate SMILES vocabularies live in `src/tani_predictor/`:
-- `chemberta-vocab.json` — 591 tokens; compatible with the existing checkpoints as-is.
-- `molformer-vocab.json` — 2,362 tokens (`<bos>=0`, `<eos>=1`, `<pad>=2`, `<mask>=3`, `<unk>=2361`); many more bracket-atom tokens (fewer `<unk>`s, shorter sequences) but needs a new Llama config (`vocab_size>=2362`, new special-token IDs), so the checkpoints would be re-initialized.
+Vocabularies live in `src/tani_predictor/vocab/`. Two reference SMILES vocabularies are kept there for comparison:
+- `chemberta-vocab.json` — 591 tokens (identical to `../ms2struct/vocab.txt`).
+- `molformer-vocab.json` — 2,362 tokens (`<bos>=0`, `<eos>=1`, `<pad>=2`, `<mask>=3`, `<unk>=2361`); many more bracket-atom tokens (fewer `<unk>`s, shorter sequences).
 
 Coverage check (`scripts/check_vocab_coverage.py`, all 14,461 FOAM `*_all_candidates.tsv` files, 36.1M SMILES unique within each file, 1.18B tokens, 133 distinct tokens in the data):
 
@@ -37,14 +30,14 @@ Coverage check (`scripts/check_vocab_coverage.py`, all 14,461 FOAM `*_all_candid
 | New tokens to add | 17 (vocab 591 -> 608) | 9 (vocab 2,362 -> 2,371) |
 | Vocab entries never used | 455 of 576 (79%) | 2,229 of 2,357 (94.6%) |
 
-Both vocabs lose almost nothing, so coverage isn't a deciding factor; adding the missing tokens gives 100% either way. The practical difference is size: ChemBERTa's needs 8 more additions but keeps the checkpoints' special-token IDs and a ~600-row embedding, while MoLFormer's needs a re-initialized config and an embedding about 4x larger that is 95% unused.
+Both vocabs lose almost nothing, so coverage isn't a deciding factor; adding the missing tokens gives 100% either way. The practical difference is size: ChemBERTa's needs 8 more additions and has a ~600-row embedding, while MoLFormer's has an embedding about 4x larger that is 95% unused.
 
-**Minimal vocab (`src/tani_predictor/tani-vocab.json`, 142 tokens):** built by `scripts/build_vocab.py` from the data itself, so it covers 100% of the FOAM SMILES with nothing unused. Layout, by id:
+**Minimal vocab (`src/tani_predictor/vocab/tani-vocab.json`, 142 tokens):** built by `scripts/build_vocab.py` from the data itself, so it covers 100% of the FOAM SMILES with nothing unused. Layout, by id:
 - 0-5: `<pad>`, `<bos>`, `<eos>`, `<unk>`, `[MS]`, `[SMILES]`
 - 6-18: input-format tokens `,` `space` `.` and digits `0`-`9`
 - 19-141: the 123 remaining SMILES tokens in the data, most frequent first (the data has 133 distinct tokens; 10 of them, `.` and `1`-`9`, are shared with the format tokens above, so peak digits and ring-closure digits use the same embeddings)
 
-The ids differ from both reference vocabs and from the existing Llama checkpoints (`pad=0` is kept; `bos=1`, `eos=2`, `vocab_size=142`), so the model config is re-initialized with this vocab. It was built from 14,462 files while FOAM runs were still adding files; rerun `scripts/build_vocab.py` if the data grows and a new token appears (a changed vocab means retraining).
+The ids differ from both reference vocabs (`pad=0`, `bos=1`, `eos=2`, `vocab_size=142`), and the model is initialized with this vocab. It was built from 14,462 files while FOAM runs were still adding files; rerun `scripts/build_vocab.py` if the data grows and a new token appears (a changed vocab means retraining).
 
 TODO: decide between this and an extended ChemBERTa/MoLFormer vocab (this one is the smallest and is exact for the current data, but any SMILES token not seen so far maps to `<unk>`).
 
@@ -56,12 +49,9 @@ TODO: decide between this and an extended ChemBERTa/MoLFormer vocab (this one is
 
 i.e. a `[MS]` marker, then comma-separated peaks (m/z `x` as an integer, so binned/rounded, and intensity `y` formatted to 4 decimals), then a `[SMILES]` marker and the candidate SMILES.
 
-Gaps between this format and the two vocab files (neither covers it as-is):
-- `[MS]`, `[SMILES]`, `,` and the peak-internal separator are not in either vocab, so they need to be added as new tokens (growing `vocab_size`) or handled by a separate tokenizer for the spectrum part.
-- Peak numbers would be tokenized digit by digit. `chemberta-vocab.json` has no `0` token (`molformer-vocab.json` does), so ChemBERTa's vocab can't represent most numbers without modification. This is a point in favor of MoLFormer's vocab or an extended ChemBERTa one.
-- Spectrum length matters: the checkpoints have `max_position_embeddings=512`. With integer `x` (about 3 digits) and `y` at 4 decimals (about 6 tokens), plus separators, a peak is roughly 10-12 tokens, so only a few dozen peaks fit alongside the SMILES. This is an estimate; the real count depends on the tokenizer.
+Tokenization: peak numbers are written character by character (digits, `.`, `,` and a space), and SMILES are split with the Schwaller regex. `[MS]`, `[SMILES]`, `,` and the space are in neither reference vocab, and `chemberta-vocab.json` has no `0` token, which is why `tani-vocab.json` was built instead. A peak is about 12 tokens, so the longest spectra (about 349 peaks) need roughly 4,300 tokens, within the 8192 context.
 
-**Open question — code not yet located:** no training script, tokenizer-assembly code, or model-wrapping code (i.e. how spectrum peaks get tokenized/concatenated with the SMILES sequence, and how the regression head attaches to the Llama backbone) was found in `chem/` or `backup/` during this search. The only artifacts found are the three initialized checkpoints above. If you find/recall where that code lives, point me at it and I'll fold the real details in here; otherwise this will need to be written from scratch.
+**Implementation:** `src/tani_predictor/` (see Status). The model is a Llama backbone (`LlamaModel`) plus a linear head on the final `<eos>` hidden state with a sigmoid, trained with MSE on the scaled target (`model.py`), initialized randomly with the 142-token `tani-vocab.json`.
 
 **Future idea to try:** a dual-encoder architecture — independent spectrum encoder and molecule encoder whose outputs are fused via cross-attention (or concatenation + MLP) rather than one joint causal-LM sequence. Worth exploring later, not the initial implementation target.
 
@@ -69,35 +59,52 @@ Target labels are the Tanimoto similarity between each candidate and the known g
 
 ## Status
 
-Environment is built; no model/data code written yet. Current layout:
+Data pipeline, tokenizer, model, training and evaluation are implemented and smoke-tested; a full-scale training run has not been done yet. `mypy --strict` is clean and `pytest` passes (`tests/`).
 
 ```
 tani_predictor/
-├── tani-pred/                   # Python 3.14 venv, built via `uv pip install -e ".[cuda]"` (gitignored)
-├── pyproject.toml               # FOAM's deps + transformers/tokenizers/safetensors/accelerate
-├── README.md
-├── .gitignore
+├── tani-pred/                   # Python 3.14 venv, `uv pip install -e ".[cuda,dev]"` (gitignored)
+├── pyproject.toml               # FOAM's deps + transformers/pydantic/pyarrow; mypy + pytest config
+├── configs/
+│   ├── base.yaml                # 6 layers, hidden 768, context 8192 (56.7M parameters)
+│   └── tiny.yaml                # smoke-test config (2 layers, hidden 64)
 ├── scripts/
-│   ├── check_vocab_coverage.py  # tokenizes all FOAM candidate SMILES, reports per-vocab coverage / new tokens needed
+│   ├── build_dataset.py         # FOAM TSVs + ms-pred spectra -> data/processed/ (parquet), fits the quantile transform
+│   ├── check_vocab_coverage.py  # per-vocab coverage of the FOAM SMILES / new tokens needed
 │   └── build_vocab.py           # builds tani-vocab.json: special + format + every SMILES token seen in the data
-└── src/
-    └── tani_predictor/
-        ├── __init__.py          # empty — package stub only, so the editable install resolves
-        ├── chemberta-vocab.json # 591-token SMILES vocab (matches the Llama checkpoints' special-token IDs)
-        ├── molformer-vocab.json # 2,362-token SMILES vocab (alternative; needs a re-initialized config)
-        └── tani-vocab.json      # 142-token minimal vocab: specials + format tokens + SMILES tokens seen in the data
+├── src/tani_predictor/
+│   ├── config.py                # pydantic Config (model/data/train) + Manifest; YAML + `--set a.b=c` overrides
+│   ├── tokenizer.py             # [MS]...[SMILES]... encoding, drops weakest peaks only if over max_len
+│   ├── spectra.py               # reads `.ms` spectra from the ms-pred HDF5 (external links, relative paths)
+│   ├── data.py                  # CandidateDataset (stratified per-spec sampling), Collator (pad to batch max)
+│   ├── model.py                 # TaniRegressor: Llama backbone + sigmoid regression head
+│   ├── train.py                 # HF Trainer entry point (resamples candidates every epoch)
+│   ├── evaluate.py              # regression + per-spec ranking metrics, checkpoint evaluation CLI
+│   ├── vocab/                   # chemberta-vocab.json, molformer-vocab.json (reference), tani-vocab.json (used)
+│   └── py.typed
+└── tests/                       # tokenizer, spectra, sampling/collator, model, config
 ```
 
-Planned (not yet created):
+### Usage
+
 ```
-src/tani_predictor/
-├── data/            # dataset classes, FOAM-candidate parsing, fingerprint/label generation
-├── models/          # Llama-backbone regressor, (future) dual-encoder variant
-├── train.py
-└── evaluate.py
-configs/             # training/model configs
-notebooks/           # exploration, EDA
+source tani-pred/bin/activate
+python scripts/build_dataset.py --workers 64                     # -> data/processed/
+python -m tani_predictor.train --config configs/base.yaml        # -> runs/base/model.pt
+python -m tani_predictor.evaluate --config configs/base.yaml --checkpoint runs/base --split val
+# multi-GPU (DDP): effective batch = per_device_batch_size x gradient_accumulation_steps x n_gpus
+NCCL_NVLS_ENABLE=0 CUDA_VISIBLE_DEVICES=4,6 torchrun --nproc_per_node=2 -m tani_predictor.train --config configs/base.yaml
+# smoke test: python scripts/build_dataset.py --max-specs 200 --out-dir data/processed_smoke
+#             python -m tani_predictor.train --config configs/tiny.yaml
 ```
+
+Design choices: context 8192 with all peaks (the longest spectra need about 4,300 tokens, so no truncation in practice); batches are random and padded only to the longest sequence in the batch; candidates are sampled per spec stratified over the scaled-target range, a fresh sample each epoch.
+
+Full processed dataset (`data/processed/`, built in about 2 minutes): 9,850 specs, 34.2M deduplicated candidates (36.5M before cross-experiment dedupe), median 2,565 candidates per spec (max 25,817). Raw Tanimoto is low and clustered (mean 0.16, median 0.15, 99th percentile 0.43), and the scaled target is close to uniform. Encoded inputs average 1,186 tokens (99th percentile 2,905, max 4,215) with no `<unk>` and exact SMILES round-trips on 1,000 sampled pairs.
+
+Base config on the real data (300 steps, effective batch 32, one shared H200): training loss 0.143 -> 0.075 (0.083 is a constant prediction of the mean), about 53 examples/s, so one epoch of the default 1.25M sampled examples (128 per spec) is roughly 6.6 hours.
+
+Smoke-test results (tiny model, 200 specs, 300 steps, scored on its own training data, so this only shows the pipeline learns): Pearson 0.31, mean per-spec Spearman 0.33, top-1 candidate Tanimoto 0.186 vs 0.153 for a random candidate. For the base config on one H200, a batch of 2 at length 8192 peaks at 5.8 GiB without gradient checkpointing (2.0 GiB with `model.gradient_checkpointing: true`).
 
 ## Data
 
@@ -112,27 +119,29 @@ smiles	tanimoto
 ```
 
 Key pieces already in place in that FOAM checkout:
-- **`run_multi.py`** (+ `run_multi_sbatch.sh`, `run_multi_collect_cands.sh`) drives many parallel formula-constrained GraphGA runs (one per `spec_id`) against ICEBERG-simulated spectra, writing results under `results/<expt_name>/<spec_id>/`. Train/val/test spec_id splits come from `split_1_testing_2.tsv`.
+- **`run_multi.py`** (+ `run_multi_sbatch.sh`, `run_multi_collect_cands.sh`) drives many parallel formula-constrained GraphGA runs (one per `spec_id`) against each spec's experimental spectrum (candidates are scored with ICEBERG-simulated spectra), writing results under `results/<expt_name>/<spec_id>/`. Train/val/test spec_id splits come from `split_1_testing_2.tsv`.
 - **`build_ground_truth_extra_seeds.py`** / `ground_truth_extra_seeds.h5` inject the real ground-truth molecule (and near neighbors) into the GA seed pool, so the explored candidate pool isn't only low-Tanimoto noise.
 - **`get_tani.py`** combines all `*_all_candidates.tsv` files under a results directory and plots the raw Tanimoto distribution.
 - **`get_mces.py`** computes an alternative MCES-based structural distance oracle, for comparison against Tanimoto.
 - **`build_tanimoto_uniform_transform.py`** fits a `sklearn.QuantileTransformer` (uniformizing/probability-integral transform) on the real logged Tanimoto distribution — raw Tanimoto scores cluster tightly, so this spreads them out to produce the **scaled Tanimoto** regression target used here. `compare_tanimoto_transforms.py` compares candidate transforms before picking one.
 
-This project's data pipeline will:
-1. Collect `(spec_id, candidate SMILES, tanimoto)` rows from the `*_all_candidates.tsv` files produced by FOAM runs.
-2. Join each `spec_id` to its source spectrum via FOAM's `spec-lib-dir` / `spec-lib-label` (ICEBERG-simulated, from `ms-pred` results).
-3. Apply the fitted quantile transform to get the scaled-Tanimoto training label.
+### Rescaling model (scaled Tanimoto)
 
-TODO: write the extraction script (`src/data/parse_foam_candidates.py`) that reads the FOAM `results/` tree directly.
+The model that rescales raw Tanimoto to the training target is a fitted `sklearn.preprocessing.QuantileTransformer(output_distribution="uniform")`, kept at **`data/processed/tani_quantile.joblib`** (`/tier1/home/ljing2/chem/tani_predictor/data/processed/tani_quantile.joblib`, gitignored; written by `scripts/build_dataset.py`). It is fit on **train-split Tanimoto values only** (up to 1,000 per spec) and applied to every candidate to produce the `target` column. Load it with `joblib.load(...)`; `transform` gives scaled targets and `inverse_transform` converts model predictions back to raw Tanimoto, so keep it together with any trained checkpoint. Rebuilding the dataset refits and overwrites it, which changes the target scale, so a model must be retrained after a rebuild. (FOAM has its own older fit at `/tier1/home/ljing2/backup/foam/tanimoto_uniform_transform.joblib`; it is not used here.)
 
-## Setup
+### Stereo handling
 
-`pyproject.toml` here is adapted from FOAM's (`backup/foam/pyproject.toml`, the `ms-gen-foam` package) rather than built from scratch, since this project consumes FOAM's data/tooling directly (RDKit fingerprints, `h5py` spectrum files, MCES oracle, etc.). On top of FOAM's dependency set it adds `transformers`, `tokenizers`, `safetensors`, and `accelerate` for the Llama backbone.
+All SMILES lose their stereo information (chirality `@` and E/Z `/` `\`) before reaching the model. `strip_stereo` in `src/tani_predictor/chem.py` returns RDKit's canonical non-isomeric SMILES (SMILES without stereo marks are returned unchanged). It is applied in three places: `TaniTokenizer.smiles_to_ids` (so training and any inference input are treated identically), `scripts/build_dataset.py` (stereoisomers that collapse to one SMILES are merged and counted in the manifest, together with the largest Tanimoto disagreement among merged rows), and the vocab scripts. Stripping cannot change the labels: FOAM's Tanimoto uses Morgan fingerprints (radius 2, no chirality), and `tests/test_chem.py` checks that the fingerprint is identical before and after stripping.
 
-Targets **Python 3.14** (vs. FOAM's 3.12), which required dropping `dgl` / `torch-scatter` / `torch-sparse` / `pygmtools` from the dependency set — none of them have Python 3.14 wheels, and all four are only used by FOAM's graph-GA candidate *search* (lazily imported, not pulled in by `foam.oracles`/`foam.evaluators` or `ms_pred.common`, which is all we need to read `*_all_candidates.tsv` and the HDF5 spectrum files). Confirmed by tracing FOAM's actual import chains rather than assuming. Everything else in the dependency set (torch, numpy, pandas, scikit-learn, rdkit, transformers, tokenizers, lightgbm, jpype1, pymoo, etc.) publishes Python 3.14 wheels as of this writing.
+Current data is unaffected: none of the 34.2M FOAM candidates carries stereo marks (FOAM's generated candidates are stereo-free), so the vocab and dataset are the same as without stripping. It matters for candidates from other sources, such as library or PubChem SMILES.
 
-```
-uv venv tani-pred --python 3.14
-source tani-pred/bin/activate
-uv pip install -e ".[cuda]"   # or ".[cpu]"
-```
+### What `scripts/build_dataset.py` does
+
+1. Scans `*/<spec_id>/*_all_candidates.tsv` under `/tier1/home/ljing2/backup/foam/results/`. Only 5 of the 9 experiment directories contain candidate logs (`cands_logging`, `_w_gt`, `_w_perma_gt`, `_mces_logging_w_perma_gt`, `_tani_logging_w_perma_gt`); the other four are earlier runs without logging. Candidates are deduplicated per spec across experiments, and a bitmask records which experiments produced each one (`source_mask`).
+2. Reads the real experimental spectra (NIST20 GC and OPCW, not simulated; ICEBERG is only FOAM's forward model for scoring candidates) from `ms-pred/data/spec_datasets/delta_1/comb_gc_delta_1/spec_files.hdf5`. Intensities are normalized to a per-spec max of 1 because some spectra are scaled to 999 and others to 9999.
+3. Fits `QuantileTransformer(output_distribution="uniform")` on **train-split** Tanimoto values only, and stores the result as the `target` column (the scaled Tanimoto). The fitted transform, a before/after histogram and a `manifest.json` are written next to the data.
+
+Findings that shaped the setup:
+- **Splits:** every spec that has candidate logs (about 9,900, 99.7% of them NIST20 GC) is in `split_1`'s *train* fold. The 620 val and 627 test specs have no candidate logs yet, so there is currently **no held-out evaluation**: we train on everything and evaluate only on training data until FOAM is run with candidate logging on the val/test specs. `build_dataset.py` uses the official split labels, so val/test populate automatically once those logs exist, and `train.py` then starts evaluating on val.
+- **Ground truth:** the TSV ground-truth SMILES (the molecule the Tanimoto is measured against) is sometimes a tautomer or stereo variant of the `labels.tsv` SMILES (16 of 50 in a sample), always with the same molecular formula. The build checks the formula and stores both (`gt_smiles`, `label_smiles`).
+- **Growing data:** FOAM runs were still adding files while this was built; rerun `build_dataset.py` (and `build_vocab.py`, since a new SMILES token means a new vocab and retraining) when the data changes.
