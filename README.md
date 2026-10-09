@@ -1,4 +1,4 @@
-# Tani Predictor
+# Tanimoto Predictor
 
 A transformer model that predicts **scaled Tanimoto similarity** between an unknown molecule's mass spectrum and a proposed candidate structure (SMILES).
 
@@ -89,18 +89,20 @@ tani_predictor/
 
 ```
 source tani-pred/bin/activate
-python scripts/build_dataset.py --workers 64                     # -> data/processed/
+python scripts/build_dataset.py --workers 64                     # -> data/processed/ (add --overwrite to replace an existing one)
 python -m tani_predictor.train --config configs/base.yaml        # -> runs/base/model.pt
-python -m tani_predictor.evaluate --config configs/base.yaml --checkpoint runs/base --split val
+python -m tani_predictor.evaluate --config configs/base.yaml --checkpoint runs/base --split test --all-candidates
 # multi-GPU (DDP): effective batch = per_device_batch_size x gradient_accumulation_steps x n_gpus
 NCCL_NVLS_ENABLE=0 CUDA_VISIBLE_DEVICES=4,6 torchrun --nproc_per_node=2 -m tani_predictor.train --config configs/base.yaml
 # smoke test: python scripts/build_dataset.py --max-specs 200 --out-dir data/processed_smoke
 #             python -m tani_predictor.train --config configs/tiny.yaml
 ```
 
+Output safety and checkpoints: `build_dataset.py` builds into `<out-dir>.building` and swaps it in only on success; it refuses a non-empty `--out-dir` without `--overwrite`, and never accepts the working directory, its parents, the home directory or the results root. When val specs exist, `train.py` evaluates every `eval_steps` (`save_steps` must be a multiple of it), keeps the checkpoint with the best `eval_mean_spec_spearman`, and `model.pt` holds that best model. `evaluate.py` loads `model.pt`, or the newest `checkpoint-N/` if a run was interrupted before `model.pt` was written.
+
 Design choices: context 8192 with all peaks (the longest spectra need about 4,300 tokens, so no truncation in practice); batches are random and padded only to the longest sequence in the batch; candidates are sampled per spec stratified over the scaled-target range, a fresh sample each epoch.
 
-Full processed dataset (`data/processed/`, built in about 2 minutes): 9,850 specs, 34.2M deduplicated candidates (36.5M before cross-experiment dedupe), median 2,565 candidates per spec (max 25,817). Raw Tanimoto is low and clustered (mean 0.16, median 0.15, 99th percentile 0.43), and the scaled target is close to uniform. Encoded inputs average 1,186 tokens (99th percentile 2,905, max 4,215) with no `<unk>` and exact SMILES round-trips on 1,000 sampled pairs.
+Full processed dataset (`data/processed/`, built in about 2 minutes): 9,935 specs (9,850 train, 45 val, 40 test), 34.4M deduplicated candidates, median 2,565 candidates per train spec (max 25,817). Raw Tanimoto is low and clustered (mean 0.16, median 0.15, 99th percentile 0.43), and the scaled target is close to uniform. Encoded inputs average 1,186 tokens (99th percentile 2,905, max 4,215) with no `<unk>` and exact SMILES round-trips on 1,000 sampled pairs.
 
 Base config on the real data (300 steps, effective batch 32, one shared H200): training loss 0.143 -> 0.075 (0.083 is a constant prediction of the mean), about 53 examples/s, so one epoch of the default 1.25M sampled examples (128 per spec) is roughly 6.6 hours.
 
@@ -137,11 +139,12 @@ Current data is unaffected: none of the 34.2M FOAM candidates carries stereo mar
 
 ### What `scripts/build_dataset.py` does
 
-1. Scans `*/<spec_id>/*_all_candidates.tsv` under `/tier1/home/ljing2/backup/foam/results/`. Only 5 of the 9 experiment directories contain candidate logs (`cands_logging`, `_w_gt`, `_w_perma_gt`, `_mces_logging_w_perma_gt`, `_tani_logging_w_perma_gt`); the other four are earlier runs without logging. Candidates are deduplicated per spec across experiments, and a bitmask records which experiments produced each one (`source_mask`).
+1. Scans `*/<spec_id>/*_all_candidates.tsv` under `/tier1/home/ljing2/backup/foam/results/`. Only 6 of the 10 experiment directories contain candidate logs (`cands_logging`, `_w_gt`, `_w_perma_gt`, `_w_perma_gt_val_test` (the val/test specs), `_mces_logging_w_perma_gt`, `_tani_logging_w_perma_gt`); the others are earlier runs without logging. Candidates are deduplicated per spec across experiments, and a bitmask records which experiments produced each one (`source_mask`).
 2. Reads the real experimental spectra (NIST20 GC and OPCW, not simulated; ICEBERG is only FOAM's forward model for scoring candidates) from `ms-pred/data/spec_datasets/delta_1/comb_gc_delta_1/spec_files.hdf5`. Intensities are normalized to a per-spec max of 1 because some spectra are scaled to 999 and others to 9999.
 3. Fits `QuantileTransformer(output_distribution="uniform")` on **train-split** Tanimoto values only, and stores the result as the `target` column (the scaled Tanimoto). The fitted transform, a before/after histogram and a `manifest.json` are written next to the data.
 
 Findings that shaped the setup:
-- **Splits:** every spec that has candidate logs (about 9,900, 99.7% of them NIST20 GC) is in `split_1`'s *train* fold. The 620 val and 627 test specs have no candidate logs yet, so there is currently **no held-out evaluation**: we train on everything and evaluate only on training data until FOAM is run with candidate logging on the val/test specs. `build_dataset.py` uses the official split labels, so val/test populate automatically once those logs exist, and `train.py` then starts evaluating on val.
+- **Splits:** the train fold (9,850 specs) is 99.7% NIST20 GC (33 OPCW specs). The val (45 specs) and test (40 specs) folds come from `..._w_perma_gt_val_test`, a FOAM run on the official `split_1` val/test specs, so far only about 7% of the 620 val and 627 test specs, and are **all OPCW**. They share no molecule with train (0 InChIKey overlaps, and none by connectivity block) or with each other. `build_dataset.py` uses the official split labels, so more val/test specs appear in the next rebuild as FOAM logs them, and `train.py` evaluates on val every `eval_steps`.
+- **Reading val/test results:** (1) evaluation measures transfer from NIST to OPCW; (2) val/test pools always contain the ground truth (Tanimoto 1.0, as these are `w_perma_gt` runs; 55% of train pools do) and have higher raw Tanimoto (mean 0.20-0.23 vs 0.16), so the scaled target, fit on train, is not uniform there and MSE is not comparable with training loss; prefer the ranking metrics (`mean_spec_spearman`, `top1_tanimoto`, `top1_is_best`); (3) 40-45 specs make the numbers noisy; (4) score every candidate for the final numbers with `evaluate --all-candidates`, since the default 256 sampled candidates per spec rarely include the ground truth.
 - **Ground truth:** the TSV ground-truth SMILES (the molecule the Tanimoto is measured against) is sometimes a tautomer or stereo variant of the `labels.tsv` SMILES (16 of 50 in a sample), always with the same molecular formula. The build checks the formula and stores both (`gt_smiles`, `label_smiles`).
 - **Growing data:** FOAM runs were still adding files while this was built; rerun `build_dataset.py` (and `build_vocab.py`, since a new SMILES token means a new vocab and retraining) when the data changes.

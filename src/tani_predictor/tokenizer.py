@@ -83,6 +83,8 @@ class TaniTokenizer:
         """Build the full input; if too long, drop the lowest-intensity peaks first."""
         smiles_ids = self.smiles_to_ids(smiles)
         budget = max_len - _N_FIXED_TOKENS - len(smiles_ids)
+        if budget < 0:
+            raise ValueError(f"SMILES needs {len(smiles_ids) + _N_FIXED_TOKENS} tokens, over max_len={max_len}")
 
         order = np.argsort(mz, kind="stable")
         mz, intensity = mz[order], intensity[order]

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parent
 DEFAULT_VOCAB_PATH: Path = PACKAGE_DIR / "vocab" / "tani-vocab.json"
@@ -56,6 +56,12 @@ class TrainConfig(_Frozen):
     seed: int = 0
     report_to: Literal["none", "wandb"] = "none"
 
+    @model_validator(mode="after")
+    def _save_steps_align_with_eval_steps(self) -> Self:
+        if self.save_steps % self.eval_steps != 0:
+            raise ValueError("save_steps must be a multiple of eval_steps (needed to keep the best checkpoint)")
+        return self
+
 
 class Config(_Frozen):
     model: ModelConfig = ModelConfig()
@@ -90,6 +96,7 @@ class Manifest(_Frozen):
     experiments: list[str]
     n_tsv_files: int
     n_specs: int
+    n_specs_without_split: int
     n_rows: int
     n_rows_before_dedupe: int
     specs_per_split: dict[str, int]

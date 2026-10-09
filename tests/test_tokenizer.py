@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from tani_predictor.tokenizer import TaniTokenizer, format_peak, tokenize_smiles
 
@@ -47,3 +48,8 @@ def test_overlong_spectrum_drops_weakest_peaks(tokenizer: TaniTokenizer) -> None
     peaks = body.replace(", ", ";").replace(",", "|").replace(";", ", ").split("|")
     kept = {int(peak.split(", ")[0]) for peak in peaks}
     assert len(kept) == enc.n_peaks_kept
+
+
+def test_smiles_longer_than_max_len_raises(tokenizer: TaniTokenizer) -> None:
+    with pytest.raises(ValueError, match="over max_len"):
+        tokenizer.encode(np.array([50], dtype=np.int64), np.array([1.0]), "C" * 50, max_len=40)

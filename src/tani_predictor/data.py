@@ -99,11 +99,12 @@ class CandidateDataset(Dataset[Item]):
         for i, rg in enumerate(self._row_groups):
             table = pf.read_row_group(rg, columns=["smiles", "tanimoto", "target"])
             target_all = table.column("target").to_numpy()
+            tanimoto_all = table.column("tanimoto").to_numpy()
             rng = np.random.default_rng([self.seed, 0 if self.fixed else epoch, rg])
             idx = stratified_sample(target_all, self.k, self.n_bins, rng)
             smiles.extend(table.column("smiles").take(idx).to_pylist())
             targets.append(target_all[idx])
-            tanimoto.append(table.column("tanimoto").to_numpy()[idx])
+            tanimoto.append(tanimoto_all[idx])
             spec_idx.append(np.full(len(idx), i, dtype=np.int64))
         self._smiles = smiles
         self.spec_index = np.concatenate(spec_idx) if spec_idx else np.zeros(0, dtype=np.int64)

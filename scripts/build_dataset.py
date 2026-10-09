@@ -14,6 +14,7 @@ import csv
 import datetime
 import random
 import shutil
+import zlib
 from collections import defaultdict
 from multiprocessing import Pool
 from pathlib import Path
@@ -42,6 +43,7 @@ RESULTS_ROOT = Path("/tier1/home/ljing2/backup/foam/results")
 MS_PRED_ROOT = Path("/tier1/home/ljing2/backup/ms-pred")
 DATASET_DIR = MS_PRED_ROOT / "data/spec_datasets/delta_1/comb_gc_delta_1"
 SPLIT_FRACTIONS: dict[str, float] = {"train": 0.8, "val": 0.1, "test": 0.1}
+MAX_EXPERIMENTS = 16  # source_mask is a uint16 bitmask
 
 CANDIDATE_SCHEMA = pa.schema(
     [
@@ -130,7 +132,7 @@ def process_spec(job: SpecJob) -> SpecResult:
     )
     pq.write_table(table, Path(job.tmp_dir) / f"{job.spec_id}.parquet", compression="zstd")
 
-    rng = np.random.default_rng([job.seed, int(sum(map(ord, job.spec_id)))])
+    rng = np.random.default_rng([job.seed, zlib.crc32(job.spec_id.encode())])
     k = min(job.sample_cap, len(tani_arr))
     sample = rng.choice(tani_arr, size=k, replace=False) if k else tani_arr[:0]
     return SpecResult(job.spec_id, n_before, len(smiles), gt_smiles, sample, n_stripped, max_diff)
@@ -149,6 +151,18 @@ def canonical(smiles: str) -> str:
 def formula(smiles: str) -> str:
     mol = Chem.MolFromSmiles(smiles)
     return CalcMolFormula(mol) if mol is not None else ""
+
+
+def check_out_dir(out_dir: Path, results_root: Path, overwrite: bool) -> Path:
+    """Resolve the output directory and refuse to clobber anything unless ``--overwrite`` is given."""
+    out_dir = out_dir.resolve()
+    cwd = Path.cwd().resolve()
+    protected = [cwd, *cwd.parents, results_root.resolve(), DATASET_DIR.resolve(), Path.home()]
+    if out_dir in protected or any(p.is_relative_to(out_dir) for p in protected):
+        raise SystemExit(f"refusing to use {out_dir}: it is, or contains, a directory that must not be replaced")
+    if out_dir.exists() and any(out_dir.iterdir()) and not overwrite:
+        raise SystemExit(f"{out_dir} is not empty; pass --overwrite to replace it once the new build succeeds")
+    return out_dir
 
 
 def select_specs(by_split: dict[str, list[str]], max_specs: int | None, seed: int) -> dict[str, list[str]]:
@@ -171,23 +185,36 @@ def main() -> None:
     ap.add_argument("--max-specs", type=int, default=None, help="Build a small subset (split-proportional).")
     ap.add_argument("--sample-cap", type=int, default=1000, help="Max Tanimoto values per spec for the quantile fit.")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--overwrite", action="store_true", help="Replace an existing --out-dir after a successful build.")
     args = ap.parse_args()
 
-    out_dir: Path = args.out_dir
-    tmp_dir = out_dir / "tmp"
+    final_dir = check_out_dir(args.out_dir, args.results_root, args.overwrite)
+    out_dir = final_dir.with_name(final_dir.name + ".building")  # staging dir, swapped in on success
     if out_dir.exists():
         shutil.rmtree(out_dir)
+    tmp_dir = out_dir / "tmp"
     tmp_dir.mkdir(parents=True)
 
     experiments, by_spec = find_candidate_files(args.results_root)
+    if len(experiments) > MAX_EXPERIMENTS:
+        raise SystemExit(f"{len(experiments)} experiments found but source_mask holds {MAX_EXPERIMENTS} bits")
     n_files = sum(len(v) for v in by_spec.values())
     print(f"{n_files} TSV files, {len(by_spec)} specs, {len(experiments)} experiments: {experiments}")
 
     splits_raw = read_tsv(DATASET_DIR / "splits/split_1.tsv", "spec", "Fold_0")
     by_split: dict[str, list[str]] = {s: [] for s in SPLIT_FRACTIONS}
+    n_without_split = 0
     for spec_id in by_spec:
-        by_split[splits_raw[spec_id]].append(spec_id)
+        split = splits_raw.get(spec_id)
+        if split not in by_split:
+            n_without_split += 1  # absent from split_1.tsv, or an unknown fold label
+            continue
+        by_split[split].append(spec_id)
+    if n_without_split:
+        print(f"WARNING: skipping {n_without_split} specs that have no train/val/test label in split_1.tsv")
     chosen = select_specs(by_split, args.max_specs, args.seed)
+    if not chosen["train"]:
+        raise SystemExit("no train-split specs selected; the quantile transform is fit on train data only")
     split_of = {spec_id: split for split, ids in chosen.items() for spec_id in ids}
     spec_ids = sorted(split_of)
     print({s: len(v) for s, v in chosen.items()})
@@ -211,7 +238,10 @@ def main() -> None:
             (tmp_dir / f"{s}.parquet").unlink()
 
     # Quantile transform fit on train-split values only.
-    train_vals = np.concatenate([results[s].sample for s in spec_ids if split_of[s] == "train"])
+    train_samples = [results[s].sample for s in spec_ids if split_of[s] == "train"]
+    train_vals = np.concatenate(train_samples) if train_samples else np.zeros(0, dtype=np.float32)
+    if len(train_vals) == 0:
+        raise SystemExit("every train-split spec had no candidate rows; cannot fit the quantile transform")
     qt = QuantileTransformer(
         n_quantiles=min(1000, len(train_vals)), output_distribution="uniform", subsample=None, random_state=args.seed
     )
@@ -291,6 +321,7 @@ def main() -> None:
         n_rows_before_dedupe=sum(r.n_rows_before for r in results.values()),
         specs_per_split={s: len(v) for s, v in chosen.items()},
         rows_per_split=dict(rows_per_split),
+        n_specs_without_split=n_without_split,
         gt_smiles_non_identical=non_identical,
         gt_smiles_formula_mismatches=formula_mismatches,
         n_smiles_stereo_stripped=sum(r.n_stereo_stripped for r in results.values()),
@@ -304,6 +335,11 @@ def main() -> None:
     print(f"{non_identical} specs: FOAM ground truth is a tautomer/stereo variant of labels.tsv (expected)")
     if formula_mismatches:
         raise SystemExit(f"{formula_mismatches} specs have a ground-truth formula that differs from labels.tsv")
+
+    if final_dir.exists():
+        shutil.rmtree(final_dir)
+    out_dir.rename(final_dir)
+    print(f"wrote {final_dir}")
 
 
 if __name__ == "__main__":

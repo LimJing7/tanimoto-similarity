@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from tani_predictor.config import Config, ModelConfig
+from tani_predictor.config import Config, ModelConfig, TrainConfig
 
 
 def test_unknown_field_rejected() -> None:
@@ -29,3 +29,9 @@ def test_shipped_configs_validate() -> None:
     root = Path(__file__).resolve().parent.parent / "configs"
     for name in ("base.yaml", "tiny.yaml"):
         Config.from_yaml(root / name)
+
+
+def test_save_steps_must_align_with_eval_steps() -> None:
+    TrainConfig(eval_steps=500, save_steps=1000)
+    with pytest.raises(ValidationError, match="multiple of eval_steps"):
+        TrainConfig(eval_steps=1000, save_steps=1500)
