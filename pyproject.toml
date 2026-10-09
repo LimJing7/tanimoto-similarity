@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=64", "wheel", "Cython", "numpy"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tani-predictor"
+version = "0.1.0"
+description = "Transformer model predicting scaled Tanimoto similarity between a mass spectrum and a candidate SMILES structure."
+authors = [
+    { name = "Lim Jing" },
+]
+readme = "README.md"
+requires-python = ">=3.12"
+
+# Core dependencies (torch is in extras based on hardware).
+# Note: unlike FOAM's pyproject, this drops dgl / torch-scatter / torch-sparse / pygmtools —
+# those are only needed to *run* FOAM's graph-GA candidate search (lazily imported in
+# foam/__init__.py via get_graph_ga_optimizer()), not to read its TSV/HDF5 outputs, and they
+# have no Python 3.14 wheels, which blocked moving off 3.12.
+dependencies = [
+    "accelerate>=0.33.0",
+    "cairosvg",
+    "cython>=3.1.3",
+    "einops>=0.8.1",
+    "h5py",
+    "ipdb>=0.13.13",
+    "jpype1",
+    "lightgbm>=4.6.0",
+    "matplotlib",
+    "myopic-MCES",
+    "msbuddy>=0.3.12",
+    "omegaconf>=2.3.0",
+    "pathos>=0.3.4",
+    "pip",
+    "pubchempy>=1.0.4",
+    "plotly",
+    "pymoo",
+    "pytorch-lightning",
+    "rdkit>=2023.9.6",
+    "safetensors",
+    "scikit-learn",
+    "seaborn>=0.13.2",
+    "setuptools",
+    "tokenizers",
+    "transformers>=4.44.0",
+    "wandb==0.21.0",
+    "wandb-osh",
+]
+
+[project.optional-dependencies]
+# Install with: uv pip install -e ".[cpu]"
+cpu = [
+    "torch>=2.14",
+    "torchvision>=0.29",
+    "torchaudio>=2.11",
+]
+# Install with: uv pip install -e ".[cuda]"
+cuda = [
+    "torch>=2.14",
+    "torchvision>=0.29",
+    "torchaudio>=2.11",
+]
+
+[tool.uv]
+# cu130 matches this machine's driver (CUDA 13.0, H200 GPUs) and has cp314 wheels for
+# torch 2.14.1 / torchvision 0.29.1 / torchaudio 2.11.0. Update the tag if the driver changes.
+extra-index-url = ["https://download.pytorch.org/whl/cu130"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

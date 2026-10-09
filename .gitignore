@@ -1,0 +1,5 @@
+tani-pred/
+.venv/
+*.egg-info/
+__pycache__/
+*.pyc
