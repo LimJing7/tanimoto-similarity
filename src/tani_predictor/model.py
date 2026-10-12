@@ -29,6 +29,12 @@ class TaniRegressor(nn.Module):
 
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
+        # PyTorch's cuDNN SDPA backward returns NaN dq (torch 2.14, H200, bf16, explicit padding mask) for query
+        # rows whose softmax log-sum-exp is below -ln(FLT_MAX) = -88.72 and whose incoming gradient is exactly 0
+        # (here: every row except <eos>). The loss stays finite, the grad-norm is NaN, then the weights are NaN.
+        # Flash/mem-efficient/math give correct gradients, so the cuDNN backend is switched off globally.
+        # TODO: this global switch is a stopgap (about 35% slower on the longest batches); see README "TODO".
+        torch.backends.cuda.enable_cudnn_sdp(False)
         self.cfg = cfg
         self.backbone = LlamaModel(build_llama_config(cfg))
         self.head = nn.Linear(cfg.hidden_size, 1)

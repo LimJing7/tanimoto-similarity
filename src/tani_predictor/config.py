@@ -43,6 +43,7 @@ class TrainConfig(_Frozen):
     output_dir: Path = Path("runs/base")
     learning_rate: float = Field(3e-4, gt=0)
     weight_decay: float = Field(0.01, ge=0)
+    max_grad_norm: float = Field(1.0, gt=0)  # must stay > 0: the non-finite-gradient guard hooks into clipping
     warmup_ratio: float = Field(0.03, ge=0, lt=1)
     num_epochs: float = Field(1.0, gt=0)
     max_steps: int = -1

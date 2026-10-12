@@ -11,11 +11,12 @@ from typing import Any
 import numpy as np
 import torch
 from numpy.typing import NDArray
-from transformers import EvalPrediction, Trainer, TrainerCallback, TrainingArguments
+from transformers import EvalPrediction, TrainerCallback, TrainingArguments
 
 from tani_predictor.config import Config
 from tani_predictor.data import CandidateDataset, Collator
 from tani_predictor.evaluate import MODEL_FILE, compute_metrics
+from tani_predictor.guard import NonFiniteGuardTrainer
 from tani_predictor.model import TaniRegressor, count_parameters
 from tani_predictor.tokenizer import TaniTokenizer
 
@@ -50,6 +51,7 @@ def make_dataset(cfg: Config, tokenizer: TaniTokenizer, split: str, evaluation: 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", type=Path, required=True)
+    ap.add_argument("--resume", type=Path, default=None, help="Resume from this checkpoint-N directory.")
     ap.add_argument("--set", dest="overrides", action="append", default=[], metavar="section.key=value")
     args = ap.parse_args()
 
@@ -79,6 +81,7 @@ def main() -> None:
         gradient_accumulation_steps=t.gradient_accumulation_steps,
         learning_rate=t.learning_rate,
         weight_decay=t.weight_decay,
+        max_grad_norm=t.max_grad_norm,
         num_train_epochs=t.num_epochs,
         max_steps=t.max_steps,
         lr_scheduler_type="cosine",
@@ -101,7 +104,7 @@ def main() -> None:
         ddp_find_unused_parameters=False,
         label_names=["labels"],
     )
-    trainer = Trainer(
+    trainer = NonFiniteGuardTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
@@ -110,7 +113,9 @@ def main() -> None:
         compute_metrics=metrics_fn if has_eval else None,
         callbacks=[ResampleCallback(train_ds)],
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=str(args.resume) if args.resume else None)
+    if trainer.nonfinite_steps:
+        print(f"WARNING: {trainer.nonfinite_steps} optimizer steps were skipped for non-finite gradients")
 
     if trainer.is_world_process_zero():
         t.output_dir.mkdir(parents=True, exist_ok=True)

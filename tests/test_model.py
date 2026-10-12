@@ -32,3 +32,9 @@ def test_padding_does_not_change_prediction() -> None:
 
 def test_backbone_uses_sdpa_attention() -> None:
     assert tiny_model().backbone.config._attn_implementation == "sdpa"
+
+
+def test_cudnn_sdpa_backend_is_disabled() -> None:
+    torch.backends.cuda.enable_cudnn_sdp(True)
+    tiny_model()
+    assert not torch.backends.cuda.cudnn_sdp_enabled()  # type: ignore[no-untyped-call]
