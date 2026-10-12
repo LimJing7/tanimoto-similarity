@@ -5,6 +5,7 @@ Run: ``python -m tani_predictor.train --config configs/base.yaml [--set train.le
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ import torch
 from numpy.typing import NDArray
 from transformers import EvalPrediction, TrainerCallback, TrainingArguments
 
-from tani_predictor.config import Config
+from tani_predictor.config import Config, TrainConfig
 from tani_predictor.data import CandidateDataset, Collator
 from tani_predictor.evaluate import MODEL_FILE, compute_metrics
 from tani_predictor.guard import NonFiniteGuardTrainer
@@ -48,33 +49,8 @@ def make_dataset(cfg: Config, tokenizer: TaniTokenizer, split: str, evaluation: 
     )
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", type=Path, required=True)
-    ap.add_argument("--resume", type=Path, default=None, help="Resume from this checkpoint-N directory.")
-    ap.add_argument("--set", dest="overrides", action="append", default=[], metavar="section.key=value")
-    args = ap.parse_args()
-
-    cfg = Config.from_yaml(args.config, args.overrides)
-    tokenizer = TaniTokenizer(cfg.data.vocab_path)
-    if len(tokenizer) != cfg.model.vocab_size:
-        raise SystemExit(f"vocab has {len(tokenizer)} tokens but model.vocab_size={cfg.model.vocab_size}")
-
-    train_ds = make_dataset(cfg, tokenizer, "train", evaluation=False)
-    eval_ds = make_dataset(cfg, tokenizer, "val", evaluation=True)
-    has_eval = len(eval_ds) > 0
-    print(f"train: {len(train_ds):,} examples from {len(train_ds.spec_ids):,} specs; "
-          f"val: {len(eval_ds):,} examples" + ("" if has_eval else " (no val specs: evaluation disabled)"))
-
-    model = TaniRegressor(cfg.model)
-    print(f"parameters: {count_parameters(model):,}")
-
-    def metrics_fn(pred: EvalPrediction) -> dict[str, float]:
-        scores: NDArray[np.float32] = np.asarray(pred.predictions, dtype=np.float32).reshape(-1)
-        return compute_metrics(scores, eval_ds.targets, eval_ds.spec_index, eval_ds.tanimoto)
-
-    t = cfg.train
-    training_args = TrainingArguments(
+def make_training_args(t: TrainConfig, has_eval: bool) -> TrainingArguments:
+    return TrainingArguments(
         output_dir=str(t.output_dir),
         per_device_train_batch_size=t.per_device_batch_size,
         per_device_eval_batch_size=t.per_device_batch_size,
@@ -104,6 +80,46 @@ def main() -> None:
         ddp_find_unused_parameters=False,
         label_names=["labels"],
     )
+
+
+def configure_reporting(t: TrainConfig) -> None:
+    """Send TensorBoard logs to a stable ``<output_dir>/tensorboard``.
+
+    The Trainer's default is a timestamped directory, which would make a ``--resume`` show up in TensorBoard as a
+    separate run. An already-set ``TENSORBOARD_LOGGING_DIR`` is respected. Must run before the Trainer is created.
+    """
+    if t.report_to == "tensorboard":
+        os.environ.setdefault("TENSORBOARD_LOGGING_DIR", str(t.output_dir / "tensorboard"))
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--config", type=Path, required=True)
+    ap.add_argument("--resume", type=Path, default=None, help="Resume from this checkpoint-N directory.")
+    ap.add_argument("--set", dest="overrides", action="append", default=[], metavar="section.key=value")
+    args = ap.parse_args()
+
+    cfg = Config.from_yaml(args.config, args.overrides)
+    tokenizer = TaniTokenizer(cfg.data.vocab_path)
+    if len(tokenizer) != cfg.model.vocab_size:
+        raise SystemExit(f"vocab has {len(tokenizer)} tokens but model.vocab_size={cfg.model.vocab_size}")
+
+    train_ds = make_dataset(cfg, tokenizer, "train", evaluation=False)
+    eval_ds = make_dataset(cfg, tokenizer, "val", evaluation=True)
+    has_eval = len(eval_ds) > 0
+    print(f"train: {len(train_ds):,} examples from {len(train_ds.spec_ids):,} specs; "
+          f"val: {len(eval_ds):,} examples" + ("" if has_eval else " (no val specs: evaluation disabled)"))
+
+    model = TaniRegressor(cfg.model)
+    print(f"parameters: {count_parameters(model):,}")
+
+    def metrics_fn(pred: EvalPrediction) -> dict[str, float]:
+        scores: NDArray[np.float32] = np.asarray(pred.predictions, dtype=np.float32).reshape(-1)
+        return compute_metrics(scores, eval_ds.targets, eval_ds.spec_index, eval_ds.tanimoto)
+
+    t = cfg.train
+    configure_reporting(t)
+    training_args = make_training_args(t, has_eval)
     trainer = NonFiniteGuardTrainer(
         model=model,
         args=training_args,

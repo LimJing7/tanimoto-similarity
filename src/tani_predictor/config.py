@@ -55,7 +55,7 @@ class TrainConfig(_Frozen):
     eval_steps: int = Field(1000, gt=0)
     save_steps: int = Field(1000, gt=0)
     seed: int = 0
-    report_to: Literal["none", "wandb"] = "none"
+    report_to: Literal["none", "wandb", "tensorboard"] = "none"
 
     @model_validator(mode="after")
     def _save_steps_align_with_eval_steps(self) -> Self:

@@ -45,6 +45,7 @@ dependencies = [
     "scipy",
     "seaborn>=0.13.2",
     "setuptools",
+    "tensorboard",
     "tokenizers",
     "transformers>=4.44.0",
     "wandb==0.21.0",
@@ -97,7 +98,7 @@ plugins = ["pydantic.mypy"]
 mypy_path = "src:scripts"
 
 [[tool.mypy.overrides]]
-module = ["rdkit.*", "sklearn.*", "pyarrow.*", "scipy.*", "h5py.*", "joblib.*", "transformers.*"]
+module = ["rdkit.*", "sklearn.*", "pyarrow.*", "scipy.*", "h5py.*", "joblib.*", "transformers.*", "tensorboard.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
